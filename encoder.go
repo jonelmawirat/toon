@@ -32,14 +32,23 @@ func indentPrefix(depth, indent int) string {
 }
 
 func encodeRootValue(lines *[]string, v Value, depth int, ctx encodeCtx) error {
+	if a, ok := arrayFromValue(v); ok {
+		return encodeArray(lines, "", false, a, depth, ctx, ctx.defaultDelim)
+	}
+
 	switch t := v.(type) {
 	case Object:
-		if len(t.Members) == 0 {
+		obj, _ := objectFromValue(t)
+		if len(obj.Members) == 0 {
 			return nil
 		}
-		return encodeObject(lines, t, depth, ctx)
-	case Array:
-		return encodeArray(lines, "", t, depth, ctx, ctx.defaultDelim)
+		return encodeObject(lines, obj, depth, ctx)
+	case *Object:
+		obj, ok := objectFromValue(t)
+		if !ok || len(obj.Members) == 0 {
+			return nil
+		}
+		return encodeObject(lines, obj, depth, ctx)
 	default:
 		s, err := encodePrimitiveToken(v, ctx.docDelim, true)
 		if err != nil {
@@ -64,17 +73,27 @@ func encodeObjectField(lines *[]string, key string, val Value, depth int, ctx en
 	if err != nil {
 		return err
 	}
+	if a, ok := arrayFromValue(val); ok {
+		return encodeArray(lines, key, true, a, depth, ctx, ctx.defaultDelim)
+	}
 
 	switch t := val.(type) {
 	case Object:
+		obj, _ := objectFromValue(t)
 		prefix := indentPrefix(depth, ctx.indent)
 		*lines = append(*lines, prefix+ek+":")
-		if len(t.Members) == 0 {
+		if len(obj.Members) == 0 {
 			return nil
 		}
-		return encodeObject(lines, t, depth+1, ctx)
-	case Array:
-		return encodeArray(lines, key, t, depth, ctx, ctx.defaultDelim)
+		return encodeObject(lines, obj, depth+1, ctx)
+	case *Object:
+		obj, ok := objectFromValue(t)
+		prefix := indentPrefix(depth, ctx.indent)
+		*lines = append(*lines, prefix+ek+":")
+		if !ok || len(obj.Members) == 0 {
+			return nil
+		}
+		return encodeObject(lines, obj, depth+1, ctx)
 	default:
 		prefix := indentPrefix(depth, ctx.indent)
 		s, err := encodePrimitiveToken(val, ctx.docDelim, true)
@@ -86,10 +105,10 @@ func encodeObjectField(lines *[]string, key string, val Value, depth int, ctx en
 	}
 }
 
-func encodeHeader(key string, length int, delim byte, fields []string) (string, error) {
+func encodeHeader(key string, hasKey bool, length int, delim byte, fields []string) (string, error) {
 	var b strings.Builder
 
-	if key != "" {
+	if hasKey {
 		ek, err := encodeKey(key)
 		if err != nil {
 			return "", err
@@ -123,9 +142,9 @@ func encodeHeader(key string, length int, delim byte, fields []string) (string, 
 	return b.String(), nil
 }
 
-func arrayKind(a Array) string {
+func arrayKind(a Array) (string, []string) {
 	if len(a) == 0 {
-		return "inline"
+		return "inline", nil
 	}
 	allPrim := true
 	allArrPrim := true
@@ -133,29 +152,28 @@ func arrayKind(a Array) string {
 		if _, ok := asPrimitive(v); !ok {
 			allPrim = false
 		}
-		av, ok := v.(Array)
+		av, ok := arrayFromValue(v)
 		if !ok || !isAllPrimitives(av) {
 			allArrPrim = false
 		}
 	}
 	if allPrim {
-		return "inline"
+		return "inline", nil
 	}
 	if allArrPrim {
-		return "arrayofarrays"
+		return "arrayofarrays", nil
 	}
 	if fields, ok := tabularFields(a); ok {
-		_ = fields
-		return "tabular"
+		return "tabular", fields
 	}
-	return "expanded"
+	return "expanded", nil
 }
 
 func tabularFields(a Array) ([]string, bool) {
 	if len(a) == 0 {
 		return nil, false
 	}
-	first, ok := a[0].(Object)
+	first, ok := objectFromValue(a[0])
 	if !ok {
 		return nil, false
 	}
@@ -172,7 +190,7 @@ func tabularFields(a Array) ([]string, bool) {
 		}
 	}
 	for i := 1; i < len(a); i++ {
-		obj, ok := a[i].(Object)
+		obj, ok := objectFromValue(a[i])
 		if !ok {
 			return nil, false
 		}
@@ -200,22 +218,22 @@ func objectValueByKey(o Object, key string) (Value, bool) {
 	return nil, false
 }
 
-func encodeArray(lines *[]string, key string, a Array, depth int, ctx encodeCtx, delim byte) error {
-	kind := arrayKind(a)
+func encodeArray(lines *[]string, key string, hasKey bool, a Array, depth int, ctx encodeCtx, delim byte) error {
+	kind, fields := arrayKind(a)
 	switch kind {
 	case "inline":
-		return encodeInlinePrimitiveArray(lines, key, a, depth, ctx, delim)
+		return encodeInlinePrimitiveArray(lines, key, hasKey, a, depth, ctx, delim)
 	case "arrayofarrays":
-		return encodeArrayOfArrays(lines, key, a, depth, ctx, delim)
+		return encodeArrayOfArrays(lines, key, hasKey, a, depth, ctx, delim)
 	case "tabular":
-		return encodeTabularArray(lines, key, a, depth, ctx, delim)
+		return encodeTabularArray(lines, key, hasKey, a, depth, ctx, delim, fields)
 	default:
-		return encodeExpandedArray(lines, key, a, depth, ctx, delim)
+		return encodeExpandedArray(lines, key, hasKey, a, depth, ctx, delim)
 	}
 }
 
-func encodeInlinePrimitiveArray(lines *[]string, key string, a Array, depth int, ctx encodeCtx, delim byte) error {
-	h, err := encodeHeader(key, len(a), delim, nil)
+func encodeInlinePrimitiveArray(lines *[]string, key string, hasKey bool, a Array, depth int, ctx encodeCtx, delim byte) error {
+	h, err := encodeHeader(key, hasKey, len(a), delim, nil)
 	if err != nil {
 		return err
 	}
@@ -237,8 +255,8 @@ func encodeInlinePrimitiveArray(lines *[]string, key string, a Array, depth int,
 	return nil
 }
 
-func encodeArrayOfArrays(lines *[]string, key string, a Array, depth int, ctx encodeCtx, delim byte) error {
-	h, err := encodeHeader(key, len(a), delim, nil)
+func encodeArrayOfArrays(lines *[]string, key string, hasKey bool, a Array, depth int, ctx encodeCtx, delim byte) error {
+	h, err := encodeHeader(key, hasKey, len(a), delim, nil)
 	if err != nil {
 		return err
 	}
@@ -247,7 +265,7 @@ func encodeArrayOfArrays(lines *[]string, key string, a Array, depth int, ctx en
 
 	for _, v := range a {
 		inner := v.(Array)
-		ih, err := encodeHeader("", len(inner), delim, nil)
+		ih, err := encodeHeader("", false, len(inner), delim, nil)
 		if err != nil {
 			return err
 		}
@@ -269,12 +287,18 @@ func encodeArrayOfArrays(lines *[]string, key string, a Array, depth int, ctx en
 	return nil
 }
 
-func encodeTabularArray(lines *[]string, key string, a Array, depth int, ctx encodeCtx, delim byte) error {
-	fields, ok := tabularFields(a)
-	if !ok {
-		return encodeExpandedArray(lines, key, a, depth, ctx, delim)
+func encodeTabularArray(lines *[]string, key string, hasKey bool, a Array, depth int, ctx encodeCtx, delim byte, fields []string) error {
+	if len(fields) == 0 {
+		var ok bool
+		fields, ok = tabularFields(a)
+		if !ok {
+			return encodeExpandedArray(lines, key, hasKey, a, depth, ctx, delim)
+		}
 	}
-	h, err := encodeHeader(key, len(a), delim, fields)
+	if len(fields) == 0 {
+		return encodeExpandedArray(lines, key, hasKey, a, depth, ctx, delim)
+	}
+	h, err := encodeHeader(key, hasKey, len(a), delim, fields)
 	if err != nil {
 		return err
 	}
@@ -282,7 +306,10 @@ func encodeTabularArray(lines *[]string, key string, a Array, depth int, ctx enc
 	*lines = append(*lines, prefix+h)
 
 	for _, rowV := range a {
-		row := rowV.(Object)
+		row, ok := objectFromValue(rowV)
+		if !ok {
+			return encodeExpandedArray(lines, key, hasKey, a, depth, ctx, delim)
+		}
 		parts := make([]string, 0, len(fields))
 		for _, f := range fields {
 			v, _ := objectValueByKey(row, f)
@@ -298,8 +325,8 @@ func encodeTabularArray(lines *[]string, key string, a Array, depth int, ctx enc
 	return nil
 }
 
-func encodeExpandedArray(lines *[]string, key string, a Array, depth int, ctx encodeCtx, delim byte) error {
-	h, err := encodeHeader(key, len(a), delim, nil)
+func encodeExpandedArray(lines *[]string, key string, hasKey bool, a Array, depth int, ctx encodeCtx, delim byte) error {
+	h, err := encodeHeader(key, hasKey, len(a), delim, nil)
 	if err != nil {
 		return err
 	}
@@ -315,21 +342,18 @@ func encodeExpandedArray(lines *[]string, key string, a Array, depth int, ctx en
 }
 
 func encodeListItem(lines *[]string, item Value, itemDepth int, ctx encodeCtx, delim byte) error {
-	switch t := item.(type) {
-	case Object:
-		return encodeListItemObject(lines, t, itemDepth, ctx, delim)
-	case Array:
-		if isAllPrimitives(t) {
-			h, err := encodeHeader("", len(t), delim, nil)
+	if a, ok := arrayFromValue(item); ok {
+		if isAllPrimitives(a) {
+			h, err := encodeHeader("", false, len(a), delim, nil)
 			if err != nil {
 				return err
 			}
-			if len(t) == 0 {
+			if len(a) == 0 {
 				*lines = append(*lines, indentPrefix(itemDepth, ctx.indent)+"- "+h)
 				return nil
 			}
-			parts := make([]string, 0, len(t))
-			for _, v := range t {
+			parts := make([]string, 0, len(a))
+			for _, v := range a {
 				s, err := encodePrimitiveToken(v, delim, true)
 				if err != nil {
 					return err
@@ -340,17 +364,29 @@ func encodeListItem(lines *[]string, item Value, itemDepth int, ctx encodeCtx, d
 			*lines = append(*lines, indentPrefix(itemDepth, ctx.indent)+"- "+h+" "+joined)
 			return nil
 		}
-		h, err := encodeHeader("", len(t), delim, nil)
+		h, err := encodeHeader("", false, len(a), delim, nil)
 		if err != nil {
 			return err
 		}
 		*lines = append(*lines, indentPrefix(itemDepth, ctx.indent)+"- "+h)
-		for _, v := range t {
+		for _, v := range a {
 			if err := encodeListItem(lines, v, itemDepth+1, ctx, delim); err != nil {
 				return err
 			}
 		}
 		return nil
+	}
+
+	switch t := item.(type) {
+	case Object:
+		obj, _ := objectFromValue(t)
+		return encodeListItemObject(lines, obj, itemDepth, ctx, delim)
+	case *Object:
+		obj, ok := objectFromValue(t)
+		if !ok {
+			return encodeListItemObject(lines, Object{}, itemDepth, ctx, delim)
+		}
+		return encodeListItemObject(lines, obj, itemDepth, ctx, delim)
 	default:
 		s, err := encodePrimitiveToken(item, 0, false)
 		if err != nil {
@@ -368,16 +404,18 @@ func encodeListItemObject(lines *[]string, obj Object, itemDepth int, ctx encode
 	}
 
 	first := obj.Members[0]
-	if a, ok := first.Value.(Array); ok {
-		if _, tab := tabularFields(a); tab {
-			fields, _ := tabularFields(a)
-			h, err := encodeHeader(first.Key, len(a), delim, fields)
+	if a, ok := arrayFromValue(first.Value); ok {
+		if fields, tab := tabularFields(a); tab {
+			h, err := encodeHeader(first.Key, true, len(a), delim, fields)
 			if err != nil {
 				return err
 			}
 			*lines = append(*lines, indentPrefix(itemDepth, ctx.indent)+"- "+h)
 			for _, rowV := range a {
-				row := rowV.(Object)
+				row, ok := objectFromValue(rowV)
+				if !ok {
+					return &Error{Message: "tabular row must be an object"}
+				}
 				parts := make([]string, 0, len(fields))
 				for _, f := range fields {
 					v, _ := objectValueByKey(row, f)
@@ -420,29 +458,22 @@ func encodeListItemFirstField(lines *[]string, m Member, itemDepth int, ctx enco
 	}
 	prefix := indentPrefix(itemDepth, ctx.indent) + "- "
 
-	switch t := m.Value.(type) {
-	case Object:
-		*lines = append(*lines, prefix+ek+":")
-		if len(t.Members) == 0 {
-			return nil
-		}
-		return encodeObject(lines, t, itemDepth+2, ctx)
-	case Array:
-		if _, tab := tabularFields(t); tab {
+	if a, ok := arrayFromValue(m.Value); ok {
+		if _, tab := tabularFields(a); tab {
 			return &Error{Message: "tabular array first-field must use special list-item form"}
 		}
-		kind := arrayKind(t)
+		kind, _ := arrayKind(a)
 		if kind == "inline" {
-			h, err := encodeHeader(m.Key, len(t), delim, nil)
+			h, err := encodeHeader(m.Key, true, len(a), delim, nil)
 			if err != nil {
 				return err
 			}
-			if len(t) == 0 {
+			if len(a) == 0 {
 				*lines = append(*lines, indentPrefix(itemDepth, ctx.indent)+"- "+h)
 				return nil
 			}
-			parts := make([]string, 0, len(t))
-			for _, v := range t {
+			parts := make([]string, 0, len(a))
+			for _, v := range a {
 				s, err := encodePrimitiveToken(v, delim, true)
 				if err != nil {
 					return err
@@ -453,17 +484,34 @@ func encodeListItemFirstField(lines *[]string, m Member, itemDepth int, ctx enco
 			*lines = append(*lines, indentPrefix(itemDepth, ctx.indent)+"- "+h+" "+joined)
 			return nil
 		}
-		h, err := encodeHeader(m.Key, len(t), delim, nil)
+		h, err := encodeHeader(m.Key, true, len(a), delim, nil)
 		if err != nil {
 			return err
 		}
 		*lines = append(*lines, indentPrefix(itemDepth, ctx.indent)+"- "+h)
-		for _, item := range t {
+		for _, item := range a {
 			if err := encodeListItem(lines, item, itemDepth+2, ctx, delim); err != nil {
 				return err
 			}
 		}
 		return nil
+	}
+
+	switch t := m.Value.(type) {
+	case Object:
+		obj, _ := objectFromValue(t)
+		*lines = append(*lines, prefix+ek+":")
+		if len(obj.Members) == 0 {
+			return nil
+		}
+		return encodeObject(lines, obj, itemDepth+2, ctx)
+	case *Object:
+		obj, ok := objectFromValue(t)
+		*lines = append(*lines, prefix+ek+":")
+		if !ok || len(obj.Members) == 0 {
+			return nil
+		}
+		return encodeObject(lines, obj, itemDepth+2, ctx)
 	default:
 		s, err := encodePrimitiveToken(m.Value, ctx.docDelim, true)
 		if err != nil {

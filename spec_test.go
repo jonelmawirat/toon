@@ -8,9 +8,9 @@ func TestDecodeInlineArrayEmptyTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	obj := v.(Object)
+	obj := mustObject(t, v)
 	tagsV, _ := obj.Get("tags")
-	tags := tagsV.(Array)
+	tags := mustArray(t, tagsV)
 	if len(tags) != 3 {
 		t.Fatalf("expected 3, got %d", len(tags))
 	}
@@ -49,7 +49,7 @@ func TestDecodeQuotedKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	obj := v.(Object)
+	obj := mustObject(t, v)
 	got, ok := obj.Get("my-key")
 	if !ok {
 		t.Fatal("missing key")

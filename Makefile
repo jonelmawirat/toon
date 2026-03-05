@@ -5,10 +5,16 @@ DIST := dist
 PROFILES := profiles
 TESTBIN := $(PROFILES)/toon.test
 BENCH := ^BenchmarkDecodeSmall$$
+CONFORMANCE_ARGS ?=
+PPROF ?= $(HOME)/go/bin/pprof
 
 .PHONY: test
 test:
 	go test ./...
+
+.PHONY: conformance-upstream
+conformance-upstream:
+	go run ./cmd/toonconformance $(CONFORMANCE_ARGS)
 
 .PHONY: bench
 bench:
@@ -29,12 +35,12 @@ profile-mem: profile-bin
 
 .PHONY: profile-cpu-text
 profile-cpu-text: profile-cpu
-	go tool pprof -top -nodecount=200 -cum $(TESTBIN) $(PROFILES)/cpu.out > $(PROFILES)/cpu.txt
+	$(PPROF) -top -nodecount=200 -cum $(PROFILES)/cpu.out > $(PROFILES)/cpu.txt
 
 .PHONY: profile-mem-text
 profile-mem-text: profile-mem
-	go tool pprof -top -nodecount=200 -cum -inuse_space $(TESTBIN) $(PROFILES)/mem.out > $(PROFILES)/mem_inuse.txt
-	go tool pprof -top -nodecount=200 -cum -alloc_space $(TESTBIN) $(PROFILES)/mem.out > $(PROFILES)/mem_alloc.txt
+	$(PPROF) -top -nodecount=200 -cum -sample_index=inuse_space $(PROFILES)/mem.out > $(PROFILES)/mem_inuse.txt
+	$(PPROF) -top -nodecount=200 -cum -sample_index=alloc_space $(PROFILES)/mem.out > $(PROFILES)/mem_alloc.txt
 
 .PHONY: gc-trace
 gc-trace: profile-bin
@@ -52,4 +58,3 @@ build: clean
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o $(DIST)/$(BIN)_linux_amd64 ./cmd/toon
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o $(DIST)/$(BIN)_linux_arm64 ./cmd/toon
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o $(DIST)/$(BIN)_windows_amd64.exe ./cmd/toon
-

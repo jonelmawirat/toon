@@ -1,9 +1,42 @@
 package toon
 
+import (
+	"sync"
+)
+
 type scannedLine struct {
-	content string
-	depth   int32
-	blank   bool
+	start uint32
+	end   uint32
+	depth int32
+}
+
+type scannedLineBuffer struct {
+	lines []scannedLine
+}
+
+var scannedLinePool = sync.Pool{
+	New: func() any {
+		return &scannedLineBuffer{lines: make([]scannedLine, 0, 128)}
+	},
+}
+
+func borrowScannedLines(minCap int) *scannedLineBuffer {
+	buf := scannedLinePool.Get().(*scannedLineBuffer)
+	if cap(buf.lines) < minCap {
+		buf.lines = make([]scannedLine, 0, minCap)
+		return buf
+	}
+	buf.lines = buf.lines[:0]
+	return buf
+}
+
+func releaseScannedLines(buf *scannedLineBuffer) {
+	if cap(buf.lines) > 1<<20 {
+		buf.lines = nil
+		return
+	}
+	buf.lines = buf.lines[:0]
+	scannedLinePool.Put(buf)
 }
 
 func scanString(s string, indent int, strict bool, dst []scannedLine) ([]scannedLine, error) {
@@ -41,8 +74,8 @@ func scanString(s string, indent int, strict bool, dst []scannedLine) ([]scanned
 			}
 			break
 		}
-
-		if strict && indent > 0 && spaces%indent != 0 {
+		blank := j >= lineEnd
+		if strict && !blank && indent > 0 && spaces%indent != 0 {
 			return nil, &Error{Line: lineNo, Column: 1, Message: "indentation must be an exact multiple of indent size"}
 		}
 
@@ -51,19 +84,10 @@ func scanString(s string, indent int, strict bool, dst []scannedLine) ([]scanned
 			depth = spaces / indent
 		}
 
-		content := s[j:lineEnd]
-		blank := true
-		for k := 0; k < len(content); k++ {
-			if content[k] != ' ' && content[k] != '\t' {
-				blank = false
-				break
-			}
-		}
-
 		dst = append(dst, scannedLine{
-			content: content,
-			depth:   int32(depth),
-			blank:   blank,
+			start: uint32(j),
+			end:   uint32(lineEnd),
+			depth: int32(depth),
 		})
 
 		if end == len(s) {

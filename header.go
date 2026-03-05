@@ -6,6 +6,8 @@ import (
 )
 
 type header struct {
+	hasKey     bool
+	keyQuoted  bool
 	key        string
 	length     int
 	delimiter  byte
@@ -13,15 +15,21 @@ type header struct {
 	inlineTail string
 }
 
-func parseKeyToken(s string) (string, error) {
+func parseKeyTokenWithQuoted(s string) (string, bool, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return "", &Error{Message: "empty key"}
+		return "", false, &Error{Message: "empty key"}
 	}
 	if s[0] == '"' {
-		return parseQuoted(s)
+		k, err := parseQuoted(s)
+		return k, true, err
 	}
-	return s, nil
+	return s, false, nil
+}
+
+func parseKeyToken(s string) (string, error) {
+	k, _, err := parseKeyTokenWithQuoted(s)
+	return k, err
 }
 
 func parseHeaderLine(line string, strict bool, fieldsScratch *[]string) (header, bool, error) {
@@ -72,7 +80,7 @@ func parseHeaderLine(line string, strict bool, fieldsScratch *[]string) (header,
 		return header{}, false, &Error{Message: "invalid array length"}
 	}
 
-	restAfterBracket := rest[closeBracket+1:]
+	restAfterBracket := strings.TrimLeft(rest[closeBracket+1:], " \t")
 	fields := []string(nil)
 
 	if len(restAfterBracket) > 0 && restAfterBracket[0] == '{' {
@@ -82,12 +90,17 @@ func parseHeaderLine(line string, strict bool, fieldsScratch *[]string) (header,
 		}
 		fieldsContent := restAfterBracket[1:closeBrace]
 		if strict {
-			if delim == ',' {
+			switch delim {
+			case ',':
 				if firstUnquotedIndex(fieldsContent, '\t') >= 0 || firstUnquotedIndex(fieldsContent, '|') >= 0 {
 					return header{}, false, &Error{Message: "delimiter mismatch between bracket and fields segment"}
 				}
-			} else {
-				if firstUnquotedIndex(fieldsContent, ',') >= 0 {
+			case '\t':
+				if firstUnquotedIndex(fieldsContent, ',') >= 0 || firstUnquotedIndex(fieldsContent, '|') >= 0 {
+					return header{}, false, &Error{Message: "delimiter mismatch between bracket and fields segment"}
+				}
+			case '|':
+				if firstUnquotedIndex(fieldsContent, ',') >= 0 || firstUnquotedIndex(fieldsContent, '\t') >= 0 {
 					return header{}, false, &Error{Message: "delimiter mismatch between bracket and fields segment"}
 				}
 			}
@@ -126,17 +139,35 @@ func parseHeaderLine(line string, strict bool, fieldsScratch *[]string) (header,
 		return header{}, false, nil
 	}
 
+	inline := strings.TrimLeft(afterColon, " ")
+	if strict && strings.TrimSpace(afterColon) != "" {
+		// Section 6: when inline values are present, there must be exactly one space after ':'.
+		if !strings.HasPrefix(afterColon, " ") {
+			return header{}, false, &Error{Message: "inline values must have exactly one space after colon"}
+		}
+		if len(afterColon) >= 2 {
+			if afterColon[1] == ' ' || afterColon[1] == '\t' {
+				return header{}, false, &Error{Message: "inline values must have exactly one space after colon"}
+			}
+		}
+	}
+
 	key := ""
+	hasKey := false
+	keyQuoted := false
 	if keyPart != "" {
-		k, err := parseKeyToken(keyPart)
+		k, quoted, err := parseKeyTokenWithQuoted(keyPart)
 		if err != nil {
 			return header{}, false, err
 		}
 		key = k
+		hasKey = true
+		keyQuoted = quoted
 	}
 
-	inline := strings.TrimLeft(afterColon, " ")
 	return header{
+		hasKey:     hasKey,
+		keyQuoted:  keyQuoted,
 		key:        key,
 		length:     int(n64),
 		delimiter:  delim,
@@ -191,7 +222,7 @@ func looksLikeRootArrayHeaderLine(line string) bool {
 		}
 	}
 
-	restAfterBracket := rest[closeBracket+1:]
+	restAfterBracket := strings.TrimLeft(rest[closeBracket+1:], " \t")
 	if len(restAfterBracket) > 0 && restAfterBracket[0] == '{' {
 		closeBrace := firstUnquotedIndex(restAfterBracket, '}')
 		if closeBrace < 0 {

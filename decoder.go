@@ -2,9 +2,12 @@ package toon
 
 import (
 	"io"
+	"strings"
+	"unsafe"
 )
 
 type parser struct {
+	source           string
 	lines            []scannedLine
 	pos              int
 	strict           bool
@@ -23,14 +26,18 @@ func decodeDocumentReader(r io.Reader, indent int, strict bool, expand ExpandPat
 }
 
 func decodeDocumentBytes(data []byte, indent int, strict bool, expand ExpandPathsMode) (Value, error) {
-	s := string(data)
-	var linesBuf [64]scannedLine
-	lines, err := scanString(s, indent, strict, linesBuf[:0])
+	s := bytesToStringNoCopy(data)
+	scanBuf := borrowScannedLines(0)
+	lines, err := scanString(s, indent, strict, scanBuf.lines[:0])
 	if err != nil {
+		releaseScannedLines(scanBuf)
 		return nil, err
 	}
+	scanBuf.lines = lines
+	defer releaseScannedLines(scanBuf)
 
 	p := parser{
+		source: s,
 		lines:  lines,
 		strict: strict,
 	}
@@ -50,6 +57,17 @@ func decodeDocumentBytes(data []byte, indent int, strict bool, expand ExpandPath
 	return val, nil
 }
 
+func bytesToStringNoCopy(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	return unsafe.String(unsafe.SliceData(data), len(data))
+}
+
+func (p *parser) lineContent(ln scannedLine) string {
+	return p.source[ln.start:ln.end]
+}
+
 func (p *parser) pushArrayDepth(depth int32) {
 	p.arrayStack = append(p.arrayStack, depth)
 }
@@ -60,7 +78,7 @@ func (p *parser) popArrayDepth() {
 
 func (p *parser) blankInside(depth int32) bool {
 	j := p.pos + 1
-	for j < len(p.lines) && p.lines[j].blank {
+	for j < len(p.lines) && p.lines[j].start == p.lines[j].end {
 		j++
 	}
 	if j >= len(p.lines) {
@@ -70,7 +88,7 @@ func (p *parser) blankInside(depth int32) bool {
 }
 
 func (p *parser) skipBlank() error {
-	for p.pos < len(p.lines) && p.lines[p.pos].blank {
+	for p.pos < len(p.lines) && p.lines[p.pos].start == p.lines[p.pos].end {
 		if p.strict && len(p.arrayStack) > 0 {
 			d := p.arrayStack[len(p.arrayStack)-1]
 			if p.blankInside(d) {
@@ -94,13 +112,14 @@ func (p *parser) parseRoot() (Value, error) {
 	if first.depth != 0 {
 		return nil, &Error{Line: firstLine, Message: "invalid indentation at root"}
 	}
+	firstContent := p.lineContent(first)
 
-	if looksLikeRootArrayHeaderLine(first.content) {
-		h, ok, err := parseHeaderLine(first.content, p.strict, &p.fieldsScratch)
+	if looksLikeRootArrayHeaderLine(firstContent) {
+		h, ok, err := parseHeaderLine(firstContent, p.strict, &p.fieldsScratch)
 		if err != nil {
 			return nil, withLine(err, firstLine)
 		}
-		if ok && h.key == "" {
+		if ok && !h.hasKey {
 			p.pos++
 			arr, err := p.parseArrayFromHeader(h, 0, false)
 			if err != nil {
@@ -116,12 +135,18 @@ func (p *parser) parseRoot() (Value, error) {
 		}
 	}
 
+	if h, ok, err := parseHeaderLine(firstContent, p.strict, &p.fieldsScratch); err != nil {
+		return nil, withLine(err, firstLine)
+	} else if ok && h.hasKey {
+		return p.parseObjectAtDepth(0)
+	}
+
 	nonBlank0 := 0
 	invalid0 := 0
 	tmpPos := p.pos
 	for tmpPos < len(p.lines) {
 		ln := p.lines[tmpPos]
-		if ln.blank {
+		if ln.start == ln.end {
 			tmpPos++
 			continue
 		}
@@ -130,17 +155,18 @@ func (p *parser) parseRoot() (Value, error) {
 			continue
 		}
 		nonBlank0++
-		isHdr := looksLikeRootArrayHeaderLine(ln.content)
-		isKV := looksLikeKeyValue(ln.content)
+		content := p.lineContent(ln)
+		isHdr := looksLikeRootArrayHeaderLine(content)
+		isKV := looksLikeKeyValue(content)
 		if !isHdr && !isKV {
 			invalid0++
 		}
 		tmpPos++
 	}
 
-	if nonBlank0 == 1 && !looksLikeKeyValue(first.content) && !looksLikeRootArrayHeaderLine(first.content) {
+	if nonBlank0 == 1 && !looksLikeKeyValue(firstContent) && !looksLikeRootArrayHeaderLine(firstContent) {
 		p.pos++
-		v, err := parsePrimitiveToken(first.content)
+		v, err := parsePrimitiveToken(firstContent)
 		if err != nil {
 			return nil, withLine(err, firstLine)
 		}
@@ -200,6 +226,7 @@ func (p *parser) parseObjectAtDepth(depth int32) (Value, error) {
 		}
 		ln := p.lines[p.pos]
 		lineNo := p.pos + 1
+		content := p.lineContent(ln)
 		if ln.depth < depth {
 			break
 		}
@@ -211,27 +238,27 @@ func (p *parser) parseObjectAtDepth(depth int32) (Value, error) {
 			continue
 		}
 
-		h, ok, err := parseHeaderLine(ln.content, p.strict, &p.fieldsScratch)
+		h, ok, err := parseHeaderLine(content, p.strict, &p.fieldsScratch)
 		if err != nil {
 			return nil, withLine(err, lineNo)
 		}
-		if ok && h.key != "" {
+		if ok && h.hasKey {
 			p.pos++
 			v, err := p.parseArrayFromHeader(h, depth, false)
 			if err != nil {
 				return nil, err
 			}
-			obj.Set(h.key, v)
+			obj.setWithQuoted(h.key, v, h.keyQuoted)
 			continue
 		}
 
-		colonPos := firstUnquotedIndex(ln.content, ':')
+		colonPos := firstUnquotedIndex(content, ':')
 		if colonPos < 0 {
 			return nil, &Error{Line: lineNo, Message: "missing colon after key"}
 		}
-		keyPart := ln.content[:colonPos]
-		valPart := ln.content[colonPos+1:]
-		key, err := parseKeyToken(keyPart)
+		keyPart := content[:colonPos]
+		valPart := content[colonPos+1:]
+		key, keyQuoted, err := parseKeyTokenWithQuoted(keyPart)
 		if err != nil {
 			return nil, withLine(err, lineNo)
 		}
@@ -243,15 +270,15 @@ func (p *parser) parseObjectAtDepth(depth int32) (Value, error) {
 			if err != nil {
 				return nil, err
 			}
-			obj.Set(key, nested)
+			obj.setWithQuoted(key, nested, keyQuoted)
 			continue
 		}
 
-		val, err := parsePrimitiveToken(valPart)
+		val, err := parsePrimitiveTokenTrimmed(valPart)
 		if err != nil {
 			return nil, withLine(err, lineNo)
 		}
-		obj.Set(key, val)
+		obj.setWithQuoted(key, val, keyQuoted)
 	}
 	return obj, nil
 }
@@ -271,13 +298,29 @@ func (p *parser) parseArrayFromHeader(h header, headerDepth int32, inListItemTab
 
 func (p *parser) parseInlinePrimitiveArray(h header) (Value, error) {
 	values := make(Array, 0, h.length)
+	if strings.IndexByte(h.inlineTail, '"') < 0 {
+		start := 0
+		for i := 0; i <= len(h.inlineTail); i++ {
+			if i < len(h.inlineTail) && h.inlineTail[i] != h.delimiter {
+				continue
+			}
+			tok := trimSpaces(h.inlineTail[start:i])
+			values = append(values, parseUnquotedPrimitiveToken(tok))
+			start = i + 1
+		}
+		if p.strict && len(values) != h.length {
+			return nil, &Error{Message: "expected " + itoa(h.length) + " inline array values, but got " + itoa(len(values))}
+		}
+		return values, nil
+	}
+
 	it := newDelimitedScanner(h.inlineTail, h.delimiter)
 	for {
 		tok, ok := it.next()
 		if !ok {
 			break
 		}
-		v, err := parsePrimitiveToken(tok)
+		v, err := parsePrimitiveTokenTrimmed(tok)
 		if err != nil {
 			return nil, err
 		}
@@ -327,7 +370,7 @@ func (p *parser) parseListItem(itemDepth int32) (Value, error) {
 	if ln.depth != itemDepth {
 		return nil, &Error{Line: lineNo, Message: "unexpected list item indentation"}
 	}
-	s := trimSpaces(ln.content)
+	s := trimSpaces(p.lineContent(ln))
 	if s == "-" {
 		p.pos++
 		return Object{}, nil
@@ -346,10 +389,7 @@ func (p *parser) parseListItem(itemDepth int32) (Value, error) {
 	if err != nil {
 		return nil, withLine(err, lineNo)
 	}
-	if ok && h.key == "" {
-		if h.inlineTail == "" && h.length != 0 {
-			return nil, &Error{Line: lineNo, Message: "inner array must be inline"}
-		}
+	if ok && !h.hasKey {
 		arr, err := p.parseArrayFromHeader(h, itemDepth, false)
 		if err != nil {
 			return nil, err
@@ -372,7 +412,7 @@ func looksLikeField(rest string) bool {
 	var buf [8]string
 	scratch := buf[:0]
 	h, ok, _ := parseHeaderLine(rest, false, &scratch)
-	if ok && h.key != "" {
+	if ok && h.hasKey {
 		return true
 	}
 	colonPos := firstUnquotedIndex(rest, ':')
@@ -397,13 +437,13 @@ func (p *parser) parseListItemObject(itemDepth int32, firstLine string) (Value, 
 		return nil, err
 	}
 
-	if ok && firstHeader.key != "" {
+	if ok && firstHeader.hasKey {
 		if firstHeader.fields != nil {
 			arr, err := p.parseTabularArray(firstHeader, itemDepth, true)
 			if err != nil {
 				return nil, err
 			}
-			obj.Set(firstHeader.key, arr)
+			obj.setWithQuoted(firstHeader.key, arr, firstHeader.keyQuoted)
 			for {
 				if err := p.skipBlank(); err != nil {
 					return nil, err
@@ -424,7 +464,7 @@ func (p *parser) parseListItemObject(itemDepth int32, firstLine string) (Value, 
 					return nil, err
 				}
 				m := v.(Member)
-				obj.Set(m.Key, m.Value)
+				obj.setWithQuoted(m.Key, m.Value, m.quoted)
 			}
 			return obj, nil
 		}
@@ -433,7 +473,7 @@ func (p *parser) parseListItemObject(itemDepth int32, firstLine string) (Value, 
 		if err != nil {
 			return nil, err
 		}
-		obj.Set(firstHeader.key, arr)
+		obj.setWithQuoted(firstHeader.key, arr, firstHeader.keyQuoted)
 	} else {
 		colonPos := firstUnquotedIndex(firstLine, ':')
 		if colonPos < 0 {
@@ -441,7 +481,7 @@ func (p *parser) parseListItemObject(itemDepth int32, firstLine string) (Value, 
 		}
 		keyPart := firstLine[:colonPos]
 		valPart := firstLine[colonPos+1:]
-		key, err := parseKeyToken(keyPart)
+		key, keyQuoted, err := parseKeyTokenWithQuoted(keyPart)
 		if err != nil {
 			return nil, err
 		}
@@ -451,13 +491,13 @@ func (p *parser) parseListItemObject(itemDepth int32, firstLine string) (Value, 
 			if err != nil {
 				return nil, err
 			}
-			obj.Set(key, nested)
+			obj.setWithQuoted(key, nested, keyQuoted)
 		} else {
-			v, err := parsePrimitiveToken(valPart)
+			v, err := parsePrimitiveTokenTrimmed(valPart)
 			if err != nil {
 				return nil, err
 			}
-			obj.Set(key, v)
+			obj.setWithQuoted(key, v, keyQuoted)
 		}
 	}
 
@@ -481,7 +521,7 @@ func (p *parser) parseListItemObject(itemDepth int32, firstLine string) (Value, 
 			return nil, err
 		}
 		m := v.(Member)
-		obj.Set(m.Key, m.Value)
+		obj.setWithQuoted(m.Key, m.Value, m.quoted)
 	}
 	return obj, nil
 }
@@ -492,27 +532,28 @@ func (p *parser) parseObjectFieldAtDepth(depth int32) (Value, error) {
 	if ln.depth != depth {
 		return nil, &Error{Line: lineNo, Message: "unexpected indentation"}
 	}
+	content := p.lineContent(ln)
 
-	h, ok, err := parseHeaderLine(ln.content, p.strict, &p.fieldsScratch)
+	h, ok, err := parseHeaderLine(content, p.strict, &p.fieldsScratch)
 	if err != nil {
 		return nil, withLine(err, lineNo)
 	}
-	if ok && h.key != "" {
+	if ok && h.hasKey {
 		p.pos++
 		v, err := p.parseArrayFromHeader(h, depth, false)
 		if err != nil {
 			return nil, err
 		}
-		return Member{Key: h.key, Value: v}, nil
+		return Member{Key: h.key, Value: v, quoted: h.keyQuoted}, nil
 	}
 
-	colonPos := firstUnquotedIndex(ln.content, ':')
+	colonPos := firstUnquotedIndex(content, ':')
 	if colonPos < 0 {
 		return nil, &Error{Line: lineNo, Message: "missing colon after key"}
 	}
-	keyPart := ln.content[:colonPos]
-	valPart := ln.content[colonPos+1:]
-	key, err := parseKeyToken(keyPart)
+	keyPart := content[:colonPos]
+	valPart := content[colonPos+1:]
+	key, keyQuoted, err := parseKeyTokenWithQuoted(keyPart)
 	if err != nil {
 		return nil, withLine(err, lineNo)
 	}
@@ -524,14 +565,14 @@ func (p *parser) parseObjectFieldAtDepth(depth int32) (Value, error) {
 		if err != nil {
 			return nil, err
 		}
-		return Member{Key: key, Value: nested}, nil
+		return Member{Key: key, Value: nested, quoted: keyQuoted}, nil
 	}
 
-	v, err := parsePrimitiveToken(valPart)
+	v, err := parsePrimitiveTokenTrimmed(valPart)
 	if err != nil {
 		return nil, withLine(err, lineNo)
 	}
-	return Member{Key: key, Value: v}, nil
+	return Member{Key: key, Value: v, quoted: keyQuoted}, nil
 }
 
 func (p *parser) parseTabularArray(h header, headerDepth int32, inListItemTabularFirst bool) (Value, error) {
@@ -545,13 +586,28 @@ func (p *parser) parseTabularArray(h header, headerDepth int32, inListItemTabula
 
 	fields := h.fields
 	fieldCount := len(fields)
-
-	out := make(Array, 0, h.length)
-	var memberStore []Member
-	if p.strict && h.length > 0 && fieldCount > 0 {
-		memberStore = make([]Member, 0, h.length*fieldCount)
+	if p.strict && fieldCount > 0 {
+		if fieldCount == 2 {
+			schema2 := &tabularSchema2{
+				key0:  fields[0],
+				key1:  fields[1],
+				kinds: make([]uint8, h.length*fieldCount),
+				texts: make([]string, h.length*fieldCount),
+			}
+			return p.parseTabularArray2Strict(h, rowDepth, schema2)
+		}
+		keysCopy := make([]string, fieldCount)
+		copy(keysCopy, fields)
+		schema := &tabularSchema{
+			keys:       keysCopy,
+			fieldCount: fieldCount,
+			kinds:      make([]uint8, h.length*fieldCount),
+			texts:      make([]string, h.length*fieldCount),
+		}
+		return p.parseTabularArrayStrict(h, rowDepth, schema)
 	}
 
+	out := make(Array, 0, h.length)
 	rowCount := 0
 	for {
 		if err := p.skipBlank(); err != nil {
@@ -562,46 +618,86 @@ func (p *parser) parseTabularArray(h header, headerDepth int32, inListItemTabula
 		}
 		ln := p.lines[p.pos]
 		lineNo := p.pos + 1
+		content := p.lineContent(ln)
 		if ln.depth < rowDepth {
 			break
 		}
 		if ln.depth > rowDepth {
 			return nil, &Error{Line: lineNo, Message: "unexpected indentation inside tabular rows"}
 		}
-		if !isTabularRowLine(ln.content, h.delimiter) {
+		if p.strict {
+			if rowCount >= h.length {
+				if !isTabularRowLine(content, h.delimiter) {
+					break
+				}
+				return nil, &Error{Line: lineNo, Message: "expected " + itoa(h.length) + " tabular rows, but got more"}
+			}
+			// For single-field tabular arrays we must keep row/key disambiguation strict.
+			if fieldCount == 1 && !isTabularRowLine(content, h.delimiter) {
+				break
+			}
+		} else if !isTabularRowLine(content, h.delimiter) {
 			break
 		}
 
-		if p.strict && rowCount >= h.length {
-			return nil, &Error{Line: lineNo, Message: "expected " + itoa(h.length) + " tabular rows, but got more"}
-		}
-
 		var rowMembers []Member
-		if memberStore != nil {
-			base := len(memberStore)
-			memberStore = memberStore[:base+fieldCount]
-			rowMembers = memberStore[base : base+fieldCount : base+fieldCount]
-		} else {
-			rowMembers = make([]Member, fieldCount)
-		}
+		rowMembers = make([]Member, fieldCount)
 
 		tokCount := 0
 		membersLen := 0
-		it := newDelimitedScanner(ln.content, h.delimiter)
-		for {
-			tok, ok := it.next()
-			if !ok {
-				break
-			}
-			if tokCount < fieldCount {
-				v, err := parsePrimitiveToken(tok)
-				if err != nil {
-					return nil, withLine(err, lineNo)
+		handledFast := false
+		if fieldCount == 2 {
+			tok0, tok1, n, okNoQuote := parseTwoFieldRowNoQuote(content, h.delimiter)
+			if okNoQuote {
+				if n >= 1 {
+					rowMembers[0].Key = fields[0]
+					assignUnquotedPrimitiveToken(&rowMembers[0], tok0)
+					membersLen = 1
 				}
-				rowMembers[tokCount] = Member{Key: fields[tokCount], Value: v}
-				membersLen++
+				if n >= 2 {
+					rowMembers[1].Key = fields[1]
+					assignUnquotedPrimitiveToken(&rowMembers[1], tok1)
+					membersLen = 2
+				}
+				tokCount = n
+				handledFast = true
 			}
-			tokCount++
+		}
+		if !handledFast {
+			if strings.IndexByte(content, '"') < 0 {
+				start := 0
+				for i := 0; i <= len(content); i++ {
+					if i < len(content) && content[i] != h.delimiter {
+						continue
+					}
+					tok := trimSpaces(content[start:i])
+					if tokCount < fieldCount {
+						rowMembers[tokCount].Key = fields[tokCount]
+						assignUnquotedPrimitiveToken(&rowMembers[tokCount], tok)
+						membersLen++
+					}
+					tokCount++
+					start = i + 1
+				}
+			} else {
+				it := newDelimitedScanner(content, h.delimiter)
+				for {
+					tok, ok := it.next()
+					if !ok {
+						break
+					}
+					if tokCount < fieldCount {
+						v, err := parsePrimitiveTokenTrimmed(tok)
+						if err != nil {
+							return nil, withLine(err, lineNo)
+						}
+						rowMembers[tokCount].Key = fields[tokCount]
+						rowMembers[tokCount].Value = v
+						membersLen++
+					}
+					tokCount++
+				}
+			}
 		}
 		if p.strict && tokCount != fieldCount {
 			return nil, &Error{Line: lineNo, Message: "expected " + itoa(fieldCount) + " values in row, but got " + itoa(tokCount)}
@@ -617,6 +713,214 @@ func (p *parser) parseTabularArray(h header, headerDepth int32, inListItemTabula
 	}
 
 	return out, nil
+}
+
+func (p *parser) parseTabularArrayStrict(h header, rowDepth int32, schema *tabularSchema) (Value, error) {
+	fieldCount := schema.fieldCount
+
+	rowCount := 0
+	for {
+		if err := p.skipBlank(); err != nil {
+			return nil, err
+		}
+		if p.pos >= len(p.lines) {
+			break
+		}
+		ln := p.lines[p.pos]
+		lineNo := p.pos + 1
+		content := p.lineContent(ln)
+		if ln.depth < rowDepth {
+			break
+		}
+		if ln.depth > rowDepth {
+			return nil, &Error{Line: lineNo, Message: "unexpected indentation inside tabular rows"}
+		}
+		if rowCount >= h.length {
+			if !isTabularRowLine(content, h.delimiter) {
+				break
+			}
+			return nil, &Error{Line: lineNo, Message: "expected " + itoa(h.length) + " tabular rows, but got more"}
+		}
+		if fieldCount == 1 && !isTabularRowLine(content, h.delimiter) {
+			break
+		}
+
+		rowBase := rowCount * fieldCount
+		tokCount := 0
+		handledFast := false
+		if fieldCount == 2 {
+			tok0, tok1, n, okNoQuote := parseTwoFieldRowNoQuote(content, h.delimiter)
+			if okNoQuote {
+				if n >= 1 {
+					assignUnquotedPackedCellToken(&schema.kinds[rowBase], &schema.texts[rowBase], tok0)
+				}
+				if n >= 2 {
+					assignUnquotedPackedCellToken(&schema.kinds[rowBase+1], &schema.texts[rowBase+1], tok1)
+				}
+				tokCount = n
+				handledFast = true
+			}
+		}
+
+		if !handledFast {
+			if strings.IndexByte(content, '"') < 0 {
+				start := 0
+				for i := 0; i <= len(content); i++ {
+					if i < len(content) && content[i] != h.delimiter {
+						continue
+					}
+					if tokCount < fieldCount {
+						idx := rowBase + tokCount
+						assignUnquotedPackedCellToken(&schema.kinds[idx], &schema.texts[idx], trimSpaces(content[start:i]))
+					}
+					tokCount++
+					start = i + 1
+				}
+			} else {
+				it := newDelimitedScanner(content, h.delimiter)
+				for {
+					tok, ok := it.next()
+					if !ok {
+						break
+					}
+					if tokCount < fieldCount {
+						v, err := parsePrimitiveTokenTrimmed(tok)
+						if err != nil {
+							return nil, withLine(err, lineNo)
+						}
+						idx := rowBase + tokCount
+						if !assignPackedCellValue(&schema.kinds[idx], &schema.texts[idx], v) {
+							return nil, &Error{Line: lineNo, Message: "non-primitive tabular value"}
+						}
+					}
+					tokCount++
+				}
+			}
+		}
+
+		if tokCount != fieldCount {
+			return nil, &Error{Line: lineNo, Message: "expected " + itoa(fieldCount) + " values in row, but got " + itoa(tokCount)}
+		}
+
+		p.pos++
+		rowCount++
+	}
+
+	if rowCount != h.length {
+		return nil, &Error{Message: "expected " + itoa(h.length) + " tabular rows, but got " + itoa(rowCount)}
+	}
+
+	return &tabularArray{schema: schema, len: rowCount}, nil
+}
+
+func (p *parser) parseTabularArray2Strict(h header, rowDepth int32, schema2 *tabularSchema2) (Value, error) {
+	rowCount := 0
+	for {
+		if err := p.skipBlank(); err != nil {
+			return nil, err
+		}
+		if p.pos >= len(p.lines) {
+			break
+		}
+		ln := p.lines[p.pos]
+		lineNo := p.pos + 1
+		content := p.lineContent(ln)
+		if ln.depth < rowDepth {
+			break
+		}
+		if ln.depth > rowDepth {
+			return nil, &Error{Line: lineNo, Message: "unexpected indentation inside tabular rows"}
+		}
+		if rowCount >= h.length {
+			if !isTabularRowLine(content, h.delimiter) {
+				break
+			}
+			return nil, &Error{Line: lineNo, Message: "expected " + itoa(h.length) + " tabular rows, but got more"}
+		}
+
+		rowBase := rowCount * 2
+		tok0, tok1, tokCount, okNoQuote := parseTwoFieldRowNoQuote(content, h.delimiter)
+		if okNoQuote {
+			if tokCount >= 1 {
+				assignUnquotedPackedCellToken(&schema2.kinds[rowBase], &schema2.texts[rowBase], tok0)
+			}
+			if tokCount >= 2 {
+				assignUnquotedPackedCellToken(&schema2.kinds[rowBase+1], &schema2.texts[rowBase+1], tok1)
+			}
+		} else {
+			tokCount = 0
+			it := newDelimitedScanner(content, h.delimiter)
+			for {
+				tok, ok := it.next()
+				if !ok {
+					break
+				}
+				if tokCount < 2 {
+					v, err := parsePrimitiveTokenTrimmed(tok)
+					if err != nil {
+						return nil, withLine(err, lineNo)
+					}
+					idx := rowBase + tokCount
+					if !assignPackedCellValue(&schema2.kinds[idx], &schema2.texts[idx], v) {
+						return nil, &Error{Line: lineNo, Message: "non-primitive tabular value"}
+					}
+				}
+				tokCount++
+			}
+		}
+
+		if tokCount != 2 {
+			return nil, &Error{Line: lineNo, Message: "expected 2 values in row, but got " + itoa(tokCount)}
+		}
+		p.pos++
+		rowCount++
+	}
+
+	if rowCount != h.length {
+		return nil, &Error{Message: "expected " + itoa(h.length) + " tabular rows, but got " + itoa(rowCount)}
+	}
+
+	return &tabularArray2{schema: schema2, len: rowCount}, nil
+}
+
+func parseTwoFieldRowNoQuote(line string, delim byte) (tok0 string, tok1 string, tokCount int, ok bool) {
+	first := -1
+	second := -1
+	delimCount := 0
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if c == '"' {
+			return "", "", 0, false
+		}
+		if c != delim {
+			continue
+		}
+		if delimCount == 0 {
+			first = i
+		} else if delimCount == 1 {
+			second = i
+		}
+		delimCount++
+	}
+
+	switch delimCount {
+	case 0:
+		return trimSpaces(line), "", 1, true
+	case 1:
+		return trimSpaces(line[:first]), trimSpaces(line[first+1:]), 2, true
+	default:
+		return trimSpaces(line[:first]), trimSpaces(line[first+1 : second]), delimCount + 1, true
+	}
+}
+
+func countDelims(s string, delim byte) int {
+	n := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == delim {
+			n++
+		}
+	}
+	return n
 }
 
 func isTabularRowLine(line string, delim byte) bool {

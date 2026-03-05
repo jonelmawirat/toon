@@ -11,10 +11,7 @@ func TestConformance_EmptyDocumentIsEmptyObject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	obj, ok := v.(Object)
-	if !ok {
-		t.Fatalf("expected Object, got %#v", v)
-	}
+	obj := mustObject(t, v)
 	if obj.Len() != 0 {
 		t.Fatalf("expected empty object, got %#v", obj)
 	}
@@ -34,7 +31,7 @@ func TestConformance_QuotedStringEscapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	obj := v.(Object)
+	obj := mustObject(t, v)
 	x, _ := obj.Get("x")
 	if x != "a\\b\"c\n\r\t" {
 		t.Fatalf("unexpected: %#v", x)
@@ -55,7 +52,7 @@ func TestConformance_NumberForbiddenLeadingZerosDecodesAsString(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	obj := v.(Object)
+	obj := mustObject(t, v)
 	x, _ := obj.Get("x")
 	if x != "0001" {
 		t.Fatalf("unexpected: %#v", x)
@@ -68,7 +65,7 @@ func TestConformance_NumberExponentAcceptedAndCanonicalized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	obj := v.(Object)
+	obj := mustObject(t, v)
 	x, _ := obj.Get("x")
 	if x != Number("-1000") {
 		t.Fatalf("unexpected: %#v", x)
@@ -81,9 +78,9 @@ func TestConformance_DelimiterScoping_SplitOnlyOnActiveDelimiter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	obj := v.(Object)
+	obj := mustObject(t, v)
 	xv, _ := obj.Get("x")
-	a := xv.(Array)
+	a := mustArray(t, xv)
 	if len(a) != 3 {
 		t.Fatalf("expected 3, got %d", len(a))
 	}
@@ -98,9 +95,9 @@ func TestConformance_InlineArray_EmptyTokenIsEmptyString(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	obj := v.(Object)
+	obj := mustObject(t, v)
 	xv, _ := obj.Get("x")
-	a := xv.(Array)
+	a := mustArray(t, xv)
 	if a[1] != "" {
 		t.Fatalf("expected empty string, got %#v", a[1])
 	}

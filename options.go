@@ -1,5 +1,6 @@
 package toon
 
+// WithEncoderIndent sets encoder indentation width in spaces.
 func WithEncoderIndent(n int) EncoderOption {
 	return func(e *Encoder) error {
 		if n <= 0 {
@@ -10,6 +11,7 @@ func WithEncoderIndent(n int) EncoderOption {
 	}
 }
 
+// WithDecoderIndent sets decoder indentation width in spaces.
 func WithDecoderIndent(n int) DecoderOption {
 	return func(d *Decoder) error {
 		if n <= 0 {
@@ -20,6 +22,7 @@ func WithDecoderIndent(n int) DecoderOption {
 	}
 }
 
+// WithDocDelimiter sets document delimiter used during encoding.
 func WithDocDelimiter(d Delimiter) EncoderOption {
 	return func(e *Encoder) error {
 		if !d.Valid() {
@@ -30,6 +33,7 @@ func WithDocDelimiter(d Delimiter) EncoderOption {
 	}
 }
 
+// WithArrayDelimiter sets array delimiter used during encoding.
 func WithArrayDelimiter(d Delimiter) EncoderOption {
 	return func(e *Encoder) error {
 		if !d.Valid() {
@@ -40,6 +44,7 @@ func WithArrayDelimiter(d Delimiter) EncoderOption {
 	}
 }
 
+// WithKeyFolding enables or disables safe key folding during encoding.
 func WithKeyFolding(mode KeyFoldingMode) EncoderOption {
 	return func(e *Encoder) error {
 		if mode != KeyFoldingOff && mode != KeyFoldingSafe {
@@ -50,6 +55,7 @@ func WithKeyFolding(mode KeyFoldingMode) EncoderOption {
 	}
 }
 
+// WithFlattenDepth limits key-folding depth during encoding.
 func WithFlattenDepth(n int) EncoderOption {
 	return func(e *Encoder) error {
 		if n < 0 {
@@ -60,6 +66,7 @@ func WithFlattenDepth(n int) EncoderOption {
 	}
 }
 
+// WithStrict enables or disables strict decode validation.
 func WithStrict(v bool) DecoderOption {
 	return func(d *Decoder) error {
 		d.strict = v
@@ -67,6 +74,7 @@ func WithStrict(v bool) DecoderOption {
 	}
 }
 
+// WithExpandPaths configures dotted-path expansion during decoding.
 func WithExpandPaths(mode ExpandPathsMode) DecoderOption {
 	return func(d *Decoder) error {
 		if mode != ExpandPathsOff && mode != ExpandPathsSafe {

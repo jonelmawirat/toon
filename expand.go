@@ -2,13 +2,29 @@ package toon
 
 import "strings"
 
+func setObjectMemberPreserveOrder(obj *Object, key string, v Value, quoted bool) {
+	for i := range obj.Members {
+		if obj.Members[i].Key == key {
+			obj.Members[i].Value = v
+			if quoted {
+				obj.Members[i].quoted = true
+			}
+			return
+		}
+	}
+	obj.Members = append(obj.Members, Member{Key: key, Value: v, quoted: quoted})
+}
+
 func expandPathsSafe(v Value, strict bool) (Value, error) {
-	switch t := v.(type) {
-	case Object:
-		return expandObjectSafe(t, strict)
-	case Array:
-		out := make(Array, 0, len(t))
-		for _, x := range t {
+	if t, ok := v.(*Object); ok && t == nil {
+		return Object{}, nil
+	}
+	if obj, ok := objectFromValue(v); ok {
+		return expandObjectSafe(obj, strict)
+	}
+	if a, ok := arrayFromValue(v); ok {
+		out := make(Array, 0, len(a))
+		for _, x := range a {
 			y, err := expandPathsSafe(x, strict)
 			if err != nil {
 				return nil, err
@@ -16,9 +32,8 @@ func expandPathsSafe(v Value, strict bool) (Value, error) {
 			out = append(out, y)
 		}
 		return out, nil
-	default:
-		return v, nil
 	}
+	return v, nil
 }
 
 func expandObjectSafe(obj Object, strict bool) (Value, error) {
@@ -29,16 +44,16 @@ func expandObjectSafe(obj Object, strict bool) (Value, error) {
 			return nil, err
 		}
 
-		if !strings.Contains(m.Key, ".") {
+		if m.quoted || !strings.Contains(m.Key, ".") {
 			if existing, ok := out.Get(m.Key); ok {
-				ao, aok := existing.(Object)
-				bo, bok := ev.(Object)
+				ao, aok := objectFromValue(existing)
+				bo, bok := objectFromValue(ev)
 				if aok && bok {
 					merged, err := deepMergeObjects(ao, bo, strict)
 					if err != nil {
 						return nil, err
 					}
-					out.Set(m.Key, merged)
+					setObjectMemberPreserveOrder(&out, m.Key, merged, m.quoted)
 					continue
 				}
 				if aok != bok {
@@ -47,7 +62,7 @@ func expandObjectSafe(obj Object, strict bool) (Value, error) {
 					}
 				}
 			}
-			out.Set(m.Key, ev)
+			setObjectMemberPreserveOrder(&out, m.Key, ev, m.quoted)
 			continue
 		}
 
@@ -60,7 +75,7 @@ func expandObjectSafe(obj Object, strict bool) (Value, error) {
 			}
 		}
 		if !ok {
-			out.Set(m.Key, ev)
+			setObjectMemberPreserveOrder(&out, m.Key, ev, m.quoted)
 			continue
 		}
 
@@ -81,30 +96,30 @@ func insertExpandedPath(dst Object, path []string, v Value, strict bool) (Object
 	key := path[0]
 	if len(path) == 1 {
 		if existing, ok := dst.Get(key); ok {
-			ao, aok := existing.(Object)
-			bo, bok := v.(Object)
+			ao, aok := objectFromValue(existing)
+			bo, bok := objectFromValue(v)
 			if aok && bok {
 				merged, err := deepMergeObjects(ao, bo, strict)
 				if err != nil {
 					return Object{}, err
 				}
-				dst.Set(key, merged)
+				setObjectMemberPreserveOrder(&dst, key, merged, false)
 				return dst, nil
 			}
 			if strict {
 				return Object{}, &Error{Message: "expansion conflict at path '" + strings.Join(path, ".") + "'"}
 			}
-			dst.Set(key, v)
+			setObjectMemberPreserveOrder(&dst, key, v, false)
 			return dst, nil
 		}
-		dst.Set(key, v)
+		setObjectMemberPreserveOrder(&dst, key, v, false)
 		return dst, nil
 	}
 
 	existing, ok := dst.Get(key)
 	var child Object
 	if ok {
-		if exObj, ok2 := existing.(Object); ok2 {
+		if exObj, ok2 := objectFromValue(existing); ok2 {
 			child = exObj
 		} else {
 			if strict {
@@ -120,7 +135,7 @@ func insertExpandedPath(dst Object, path []string, v Value, strict bool) (Object
 	if err != nil {
 		return Object{}, err
 	}
-	dst.Set(key, updatedChild)
+	setObjectMemberPreserveOrder(&dst, key, updatedChild, false)
 	return dst, nil
 }
 
@@ -131,23 +146,23 @@ func deepMergeObjects(a Object, b Object, strict bool) (Object, error) {
 	}
 	for _, m := range b.Members {
 		if existing, ok := out.Get(m.Key); ok {
-			ao, aok := existing.(Object)
-			bo, bok := m.Value.(Object)
+			ao, aok := objectFromValue(existing)
+			bo, bok := objectFromValue(m.Value)
 			if aok && bok {
 				merged, err := deepMergeObjects(ao, bo, strict)
 				if err != nil {
 					return Object{}, err
 				}
-				out.Set(m.Key, merged)
+				setObjectMemberPreserveOrder(&out, m.Key, merged, m.quoted)
 				continue
 			}
 			if strict {
 				return Object{}, &Error{Message: "expansion conflict at path '" + m.Key + "'"}
 			}
-			out.Set(m.Key, m.Value)
+			setObjectMemberPreserveOrder(&out, m.Key, m.Value, m.quoted)
 			continue
 		}
-		out.Set(m.Key, m.Value)
+		setObjectMemberPreserveOrder(&out, m.Key, m.Value, m.quoted)
 	}
 	return out, nil
 }

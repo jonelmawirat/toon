@@ -1,6 +1,14 @@
 package toon
 
+import "strings"
+
 func trimSpaces(s string) string {
+	if len(s) == 0 {
+		return s
+	}
+	if s[0] != ' ' && s[len(s)-1] != ' ' {
+		return s
+	}
 	i := 0
 	j := len(s)
 	for i < j && s[i] == ' ' {
@@ -13,6 +21,10 @@ func trimSpaces(s string) string {
 }
 
 func firstUnquotedIndex(s string, target byte) int {
+	if strings.IndexByte(s, '"') < 0 {
+		return strings.IndexByte(s, target)
+	}
+
 	inQuotes := false
 	esc := false
 	for i := 0; i < len(s); i++ {
